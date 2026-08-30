@@ -1,0 +1,83 @@
+rules_version = '2';
+
+// This app uses Firebase Authentication (email + password).
+// Every signed-in user has a profile at /users/{uid} with:
+//   - role:   "officer" or "admin"
+//   - status: "pending" or "approved"
+//
+// Signing up ONLY creates a "pending" / "officer" profile — it can never
+// grant admin or approved access by itself. A pending account cannot read
+// or write ANY data (records, settings, or other users) until an existing
+// approved Admin approves it from the "Staff access" screen (or via the
+// Firebase Console). This stops anyone who merely gets the site link from
+// registering their own account and immediately having access.
+//
+// Once approved:
+//   - officer: can read all records, create new records, edit existing ones.
+//   - admin:   everything an officer can do, PLUS delete records, restore
+//              the whole database from a backup file, and approve/reject
+//              other staff accounts.
+//
+// IMPORTANT: because this data contains citizens' NIC numbers and other
+// personal information, nobody who is not signed in AND approved can read
+// or write anything below.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isApproved() {
+      return isSignedIn() && myProfile().status == 'approved';
+    }
+
+    function isAdmin() {
+      return isApproved() && myProfile().role == 'admin';
+    }
+
+    match /records/{recordId} {
+      allow read: if isApproved();
+      allow create, update: if isApproved();
+      allow delete: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    match /users/{userId} {
+      // A signed-in user can always read their OWN profile — needed so a
+      // freshly-registered (still pending) account can check its own status
+      // and show the "waiting for approval" screen. Approved staff can also
+      // read the full list, so the app can show a staff/approvals screen.
+      allow read: if isSignedIn() && (request.auth.uid == userId || isApproved());
+
+      // A user may create ONLY their own profile document, and it MUST be
+      // created as role "officer" + status "pending". A signed-up user can
+      // never write "admin" or "approved" into their own new document —
+      // that closes the old loophole where the sign-up screen let anyone
+      // choose "Admin" for themselves.
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.role == 'officer' &&
+        request.resource.data.status == 'pending';
+
+      // Nobody can change their own role or approval status (so a pending
+      // or officer account can't just edit its own document to approve or
+      // promote itself). Only an existing approved Admin can approve a
+      // pending account, change someone else's role, or revoke access.
+      allow update: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == userId &&
+         request.resource.data.role == resource.data.role &&
+         request.resource.data.status == resource.data.status);
+
+      // Only an approved Admin can delete/reject a staff account.
+      allow delete: if isAdmin();
+    }
+  }
+}
